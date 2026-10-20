@@ -92,20 +92,28 @@ def transfer_count(raw: dict[str, Any]) -> int:
     return max(0, len(legs) - 1)
 
 
-def build_stops(raw: dict[str, Any], stations: dict[str, Any], cities: dict[str, Any]) -> list[dict[str, Any]]:
+def build_stops(
+    raw: dict[str, Any],
+    stations: dict[str, Any],
+    cities: dict[str, Any],
+    tz: tzinfo | None = None,
+) -> list[dict[str, Any]]:
     """Haltfolge aus `legs`. Es gibt keinen anonymous Detail-Endpunkt.
 
     Jedes Leg liefert Abfahrts- und Ankunftshaltestelle mit Zeit. Die
     Ankunft eines Legs ist die Abfahrt des nächsten (Umstieg am selben
-    Bahnhof), deshalb wird nur der Umstiegspunkt einmal ausgegeben.
+    Bahnhof), deshalb wird der Umstiegspunkt nur einmal ausgegeben.
+
+    `tz` ist der Offset der Abfahrtsstadt; ohne ihn wird der Offset des
+    ersten Legs benutzt (die API liefert je Stadt einen eigenen Offset).
     """
     legs = [l for l in (raw.get("legs") or []) if isinstance(l, dict)]
     if not legs:
         return []
-    tz = None
-    first_dep = parse_api_datetime((legs[0].get("departure") or {}).get("date"))
-    if first_dep is not None and first_dep.tzinfo is not None:
-        tz = first_dep.tzinfo
+    if tz is None:
+        first_dep = parse_api_datetime((legs[0].get("departure") or {}).get("date"))
+        if first_dep is not None and first_dep.tzinfo is not None:
+            tz = first_dep.tzinfo
 
     stops: list[dict[str, Any]] = []
 
@@ -127,7 +135,7 @@ def build_stops(raw: dict[str, Any], stations: dict[str, Any], cities: dict[str,
             "means_of_transport": str(legs[0].get("means_of_transport") or ""),
         }
     )
-    for idx, leg in enumerate(legs[1:], start=1):
+    for leg in legs[1:]:
         arr = leg.get("departure") or {}
         stops.append(
             {
@@ -176,9 +184,7 @@ def normalise_trip(
     legs = raw.get("legs") or []
     modes = {str(l.get("means_of_transport") or "") for l in legs if isinstance(l, dict)}
     modes.discard("")
-    if not modes:
-        service = "bus"
-    elif modes == {"bus"}:
+    if not modes or modes == {"bus"}:
         service = "bus"
     elif modes == {"train"}:
         service = "train"

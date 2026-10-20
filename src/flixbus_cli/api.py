@@ -246,3 +246,58 @@ def resolve_city(query: str, *, sess: requests.Session | None = None) -> dict[st
         names = ", ".join(c["name"] for c in candidates[:8]) or "keine Vorschläge"
         raise ValueError(f"Stadt {raw!r} nicht gefunden. Vorschläge: {names}.")
     return best
+
+
+# ---------- Suche ----------
+
+
+def search_trips(
+    from_id: str,
+    to_id: str,
+    day: date,
+    *,
+    adults: int = 1,
+    sess: requests.Session | None = None,
+) -> dict[str, Any]:
+    """Roh-Suche. Gibt die ungefilterte API-Antwort zurück."""
+    sess = sess or session()
+    params = {
+        "from_city_id": from_id,
+        "to_city_id": to_id,
+        "departure_date": day.strftime("%d.%m.%Y"),
+        "products": json.dumps({"adult": adults}),
+        "currency": "EUR",
+        "locale": "de",
+        "search_by": "cities",
+        "include_after_midnight_rides": "1",
+    }
+    data = _get_json(sess, base_url() + SEARCH_PATH, params)
+    if not isinstance(data, dict):
+        raise ParseError("Unerwartetes Antwortformat: Objekt erwartet.")
+    return data
+
+
+def extract_results(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """trips[0].results -> Dict uid->trip.
+
+    `results` kommt live als **Dict** (Schlüssel = uid), nicht als Liste.
+    Beide Formen werden akzeptiert, weil das Format nicht garantiert ist.
+    """
+    trips = data.get("trips")
+    if not isinstance(trips, list) or not trips:
+        raise ParseError("Antwort enthält keine 'trips'-Liste.")
+    first = trips[0]
+    if not isinstance(first, dict):
+        raise ParseError("Unerwartetes Format in trips[0].")
+    results = first.get("results")
+    if results is None:
+        raise ParseError("Antwort enthält kein 'results'.")
+    if isinstance(results, dict):
+        return {k: v for k, v in results.items() if isinstance(v, dict)}
+    if isinstance(results, list):
+        out: dict[str, dict[str, Any]] = {}
+        for idx, item in enumerate(results):
+            if isinstance(item, dict):
+                out[str(item.get("uid") or idx)] = item
+        return out
+    raise ParseError("Unerwartetes Format in trips[0].results.")
