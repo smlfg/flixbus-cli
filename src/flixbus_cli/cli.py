@@ -14,12 +14,13 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import traceback
 from datetime import date, timedelta
 from typing import Any, Callable
 
-from . import __version__, api, formatting, watch
+from . import __version__, api, cache_store, formatting, watch
 from .api import HttpError, ParseError
 
 LOG = logging.getLogger("flixbus_cli")
@@ -182,7 +183,19 @@ def _run_search(
                 "cities": cities_map,
                 "tz": tz,
                 "origin": origin,
+                "day_iso": day_iso,
+                "adults": adults,
             }
+        try:
+            cache_store.save(
+                origin["id"], dest["id"], day, adults,
+                raw=raw,
+                origin=origin,
+                destination=dest,
+                tz_offset_seconds=int(origin.get("timezone_offset_seconds") or 0) or None,
+            )
+        except Exception as exc:  # pragma: no cover - Cache ist optional
+            LOG.debug("Cache-Schreiben fehlgeschlagen: %s", exc)
 
     trips = formatting.apply_filters(
         trips, max_price=max_price, direct_only=direct_only, after=after, before=before
@@ -239,25 +252,145 @@ def cmd_search(args: argparse.Namespace, as_json: bool) -> int:
 # ---------- trip ----------
 
 
+def _search_params_from_process_cache() -> list[tuple[str, date, int]]:
+    """Bekannte Such-Parameter aus dem Prozess-Cache: (from_id, day, adults)."""
+    out: list[tuple[str, date, int]] = []
+    seen: set[tuple[str, date, int]] = set()
+    for entry in _TRIP_CACHE.values():
+        if not isinstance(entry, dict):
+            continue
+        origin = entry.get("origin") or {}
+        from_id = str(origin.get("id") or "")
+        if not from_id:
+            continue
+        day_iso = entry.get("day_iso")
+        if not isinstance(day_iso, str):
+            continue
+        try:
+            day = date.fromisoformat(day_iso)
+        except ValueError:
+            continue
+        try:
+            adults = int(entry.get("adults") or 1)
+        except (TypeError, ValueError):
+            adults = 1
+        if from_id and (from_id, day, adults) not in seen:
+            seen.add((from_id, day, adults))
+            out.append((from_id, day, adults))
+    return out
+
+
+def _resolve_trip_entry(trip_id: str) -> dict[str, Any] | None:
+    """Sucht den Trip zuerst im Prozess-Cache, dann auf der Platte.
+
+    Funktioniert auch in einem **neuen** Prozess: ``search`` legt jeden
+    Treffer als Cache-Datei ab, ``trip`` liest sie und rekonstruiert die
+    Haltfolge aus ``legs``.
+    """
+    cached = _TRIP_CACHE.get(trip_id)
+    if cached is not None:
+        return cached
+
+    # 1) Mit den im aktuellen Prozess bekannten Such-Parametern versuchen.
+    for from_id, day, adults in _search_params_from_process_cache():
+        hit = cache_store.find_trip(trip_id, from_id=from_id, to_id="", day=day, adults=adults)
+        if hit is not None:
+            return hit
+
+    # 2) ENV-Override (``FLIX_TRIP_FROM_ID`` etc.) für Skripte.
+    env_from = os.environ.get("FLIX_TRIP_FROM_ID", "").strip()
+    env_to = os.environ.get("FLIX_TRIP_TO_ID", "").strip()
+    env_date = os.environ.get("FLIX_TRIP_DATE", "").strip()
+    env_adults = os.environ.get("FLIX_TRIP_ADULTS", "1").strip() or "1"
+    if env_from and env_date:
+        try:
+            day = date.fromisoformat(env_date)
+        except ValueError:
+            day = None
+        if day is not None:
+            try:
+                adults = max(1, int(env_adults))
+            except ValueError:
+                adults = 1
+            hit = cache_store.find_trip(trip_id, from_id=env_from, to_id=env_to, day=day, adults=adults)
+            if hit is not None:
+                return hit
+
+    # 3) Alle Cache-Dateien auf der Platte linear durchsuchen.
+    return _scan_disk_for_trip(trip_id)
+
+
+def _scan_disk_for_trip(trip_id: str) -> dict[str, Any] | None:
+    """Sucht ``trip_id`` im Cache-Verzeichnis."""
+    import glob
+
+    for path in glob.glob(
+        os.path.join(cache_store.cache_dir(), f"{cache_store.CACHE_FILE_PREFIX}*.json")
+    ):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        raw = data.get("raw")
+        if not isinstance(raw, dict):
+            continue
+        for seg in raw.get("trips") or []:
+            if not isinstance(seg, dict):
+                continue
+            inner = seg.get("results")
+            if isinstance(inner, dict) and trip_id in inner and isinstance(
+                inner[trip_id], dict
+            ):
+                return {
+                    "raw": inner[trip_id],
+                    "stations": raw.get("stations") or {},
+                    "cities": raw.get("cities") or {},
+                    "tz_offset_seconds": data.get("tz_offset_seconds"),
+                    "origin": data.get("origin"),
+                    "destination": data.get("destination"),
+                    "saved_at": data.get("saved_at"),
+                }
+    return None
+
+
 def cmd_trip(args: argparse.Namespace, as_json: bool) -> int:
     trip_id = (args.trip_id or "").strip()
     if not trip_id:
         raise ValueError("TRIP_ID darf nicht leer sein.")
 
-    cached = _TRIP_CACHE.get(trip_id)
-    if cached is None:
+    entry = _resolve_trip_entry(trip_id)
+    if entry is None:
         raise ParseError(
-            f"Trip {trip_id!r} ist nicht bekannt. `flix trip` zeigt die Halte "
-            "einer Verbindung aus der Ausgabe von `flix search`; Flix bietet "
-            "keinen anonym erreichbaren Fahrtdetails-Endpunkt."
+            f"Trip {trip_id!r} ist nicht im Cache. `flix trip` zeigt die Halte "
+            "einer Verbindung aus der zuletzt gelaufenen Suche; Flix bietet "
+            "keinen anonym erreichbaren Fahrtdetails-Endpunkt. Bitte zuerst "
+            "`flix search FROM TO --date ...` mit den gleichen Parametern "
+            "ausführen."
         )
 
-    raw = cached["raw"]
-    tz = cached["tz"]
-    stops = formatting.build_stops(raw, cached["stations"], cached["cities"], tz)
+    raw = entry["raw"]
+    stations = entry.get("stations") or {}
+    cities_map = entry.get("cities") or {}
+    tz = formatting.offset_from_seconds(entry.get("tz_offset_seconds"))
+    stops = formatting.build_stops(raw, stations, cities_map, tz)
     dep = stops[0] if stops else {}
     arr = stops[-1] if stops else {}
     minutes = formatting.duration_minutes(raw.get("duration"))
+    dep_moment = formatting.parse_api_datetime((raw.get("departure") or {}).get("date"))
+    arr_moment = formatting.parse_api_datetime((raw.get("arrival") or {}).get("date"))
+    if dep_moment is not None and dep_moment.tzinfo is None and tz is not None:
+        dep_moment = dep_moment.replace(tzinfo=tz)
+    if arr_moment is not None and arr_moment.tzinfo is None and tz is not None:
+        arr_moment = arr_moment.replace(tzinfo=tz)
+    real_minutes = formatting.instant_diff_minutes(dep_moment, arr_moment)
+    if real_minutes is not None:
+        if minutes is not None and abs(real_minutes - minutes) > 1:
+            LOG.debug("Dauer-Mismatch: api=%s real=%s", minutes, real_minutes)
+        minutes = real_minutes
+
     price = raw.get("price") or {}
     available = raw.get("available") or {}
     remaining = raw.get("remaining") or {}
@@ -278,9 +411,28 @@ def cmd_trip(args: argparse.Namespace, as_json: bool) -> int:
         "price_with_platform_fee": price.get("total_with_platform_fee"),
         "seats_available": seats,
         "stops": stops,
-        "timezone": str(tz) if tz is not None else None,
+        "timezone": _tz_label(tz),
+        "source": "cache",
+        "saved_at": entry.get("saved_at"),
     }
     return emit(payload, as_json)
+
+
+def _tz_label(tz) -> str | None:
+    if tz is None:
+        return None
+    try:
+        # datetime.tzname() auf einer timezone-Instanz gibt nur den Namen,
+        # deshalb den Offset selbst anhängen.
+        offset = tz.utcoffset(None)
+        if offset is None:
+            return str(tz)
+        total = int(offset.total_seconds())
+        sign = "+" if total >= 0 else "-"
+        total = abs(total)
+        return f"{sign}{total // 3600:02d}:{(total % 3600) // 60:02d}"
+    except Exception:  # pragma: no cover - defensive
+        return None
 
 
 # ---------- cheapest ----------
@@ -342,9 +494,15 @@ def cmd_watch(args: argparse.Namespace, as_json: bool) -> int:
     if sub == "remove":
         wid = (args.id or "").strip()
         if not wid:
-            raise ValueError("ID darf nicht leer sein.")
+            return fail(EXIT_USAGE, "ID darf nicht leer sein.", as_json=as_json)
         existed, _ = watch.remove(wid)
-        return emit({"removed": existed, "noop": not existed, "id": wid}, as_json)
+        # INTERFACE.md sagt: idempotent (No-op + Exit 0). Bei ``--json`` melden
+        # wir den Vollzug; ohne ``--json`` schweigen wir bei No-op.
+        if not existed and not as_json:
+            return EXIT_OK
+        if not existed:
+            return emit({"removed": False, "noop": True, "id": wid}, as_json, text=f"Unbekannte ID: {wid}")
+        return emit({"removed": True, "noop": False, "id": wid}, as_json, text=f"Entfernt: {wid}")
 
     if sub == "check":
         items = watch.all_entries()
@@ -524,6 +682,8 @@ def main(argv: list[str] | None = None) -> int:
         return fail(EXIT_NETWORK, str(exc), as_json=as_json)
     except ParseError as exc:
         return fail(EXIT_PARSE, str(exc), as_json=as_json)
+    except SystemExit:
+        raise
     except Exception as exc:  # letzter Schutz: nie ein Traceback auf stdout
         LOG.error("unerwarteter Fehler: %s", exc)
         LOG.debug(traceback.format_exc())
