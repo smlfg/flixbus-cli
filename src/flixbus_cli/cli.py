@@ -15,8 +15,11 @@ import argparse
 import json
 import logging
 import sys
+import traceback
+from typing import Any, Callable
 
 from . import __version__
+from .api import HttpError, ParseError
 
 LOG = logging.getLogger("flixbus_cli")
 
@@ -39,7 +42,7 @@ _KIND_BY_EXIT = {
 # ---------- Zentrale Ausgabe ----------
 
 
-def emit(payload: dict, as_json: bool, text: str | None = None) -> int:
+def emit(payload: dict[str, Any], as_json: bool, text: str | None = None) -> int:
     if as_json:
         sys.stdout.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
     else:
@@ -62,7 +65,7 @@ def fail(code: int, message: str, *, as_json: bool, kind: str | None = None) -> 
     return code
 
 
-def _to_text(payload: dict) -> str:
+def _to_text(payload: dict[str, Any]) -> str:
     """Lesbare Darstellung für den Non-JSON-Modus."""
     lines: list[str] = []
 
@@ -96,6 +99,21 @@ def _to_text(payload: dict) -> str:
     return "\n".join(lines) if lines else ""
 
 
+# ---------- cities ----------
+
+
+def cmd_cities(args: argparse.Namespace, as_json: bool) -> int:
+    from . import api
+
+    query = (args.query or "").strip()
+    limit = api.parse_positive_int(args.limit, "--limit", minimum=1, maximum=50)
+    cities = api.find_cities(query)
+    cities.sort(key=lambda c: (c["name"].strip().lower() != query.lower(), c["name"].strip().lower()))
+    selected = cities[:limit]
+    payload = {"query": query, "cities": selected, "count": len(selected)}
+    return emit(payload, as_json)
+
+
 # ---------- Parser ----------
 
 
@@ -111,7 +129,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--json", action="store_true", help="Genau ein JSON-Objekt auf stdout.")
     sub = parser.add_subparsers(dest="cmd", required=False)
-    sub.add_parser("cities", help="Städte nach Name suchen")
+    p_cities = sub.add_parser("cities", help="Städte nach Name suchen")
+    p_cities.add_argument("query", nargs="?", default="", help="Suchbegriff")
+    p_cities.add_argument("--limit", default="10", help="Maximale Trefferzahl (1–50)")
+    p_cities.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
     sub.add_parser("search", help="Verbindungen suchen")
     sub.add_parser("trip", help="Halte einer Verbindung anzeigen")
     sub.add_parser("cheapest", help="Günstigsten Tag im Zeitraum finden")
@@ -121,6 +142,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 # ---------- main ----------
+
+
+HANDLERS: dict[str, Callable[[argparse.Namespace, bool], int]] = {
+    "cities": cmd_cities,
+}
 
 
 def _split_json_flag(raw: list[str]) -> tuple[bool, list[str]]:
@@ -153,11 +179,29 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd is None:
         if as_json:
-            return emit({"commands": ["cities", "search", "trip", "cheapest", "watch", "book"], "version": __version__}, as_json)
+            return emit(
+                {"commands": ["cities", "search", "trip", "cheapest", "watch", "book"], "version": __version__},
+                as_json,
+            )
         parser.print_help()
         return EXIT_OK
 
-    return fail(EXIT_USAGE, f"Unbekannter Befehl: {args.cmd}", as_json=as_json)
+    handler = HANDLERS.get(args.cmd)
+    if handler is None:
+        return fail(EXIT_USAGE, f"Unbekannter Befehl: {args.cmd}", as_json=as_json)
+
+    try:
+        return handler(args, as_json=as_json)
+    except ValueError as exc:
+        return fail(EXIT_USAGE, str(exc), as_json=as_json)
+    except HttpError as exc:
+        return fail(EXIT_NETWORK, str(exc), as_json=as_json)
+    except ParseError as exc:
+        return fail(EXIT_PARSE, str(exc), as_json=as_json)
+    except Exception as exc:  # letzter Schutz: nie ein Traceback auf stdout
+        LOG.error("unerwarteter Fehler: %s", exc)
+        LOG.debug(traceback.format_exc())
+        return fail(EXIT_PARSE, f"Unerwarteter Fehler: {exc}", as_json=as_json, kind="internal")
 
 
 if __name__ == "__main__":  # pragma: no cover
