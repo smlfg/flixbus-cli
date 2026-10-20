@@ -1,9 +1,11 @@
 """Normalisierung der API-Antwort zu den Ausgabe-Objekten aus INTERFACE.md.
 
 Wichtig (live verifiziert, siehe docs/ENDPOINTS.md):
-* Die API liefert je Stadt einen eigenen UTC-Offset. Stuttgart +02:00,
-  München +01:00 am selben Tag. Für die Anzeige wird deshalb alles auf den
-  Offset der Abfahrtsstadt normalisiert.
+* Die API liefert pro Zeitstempel einen eigenen UTC-Offset
+  (z. B. `+02:00` für Stuttgart und `+01:00` für München am selben Tag,
+  insbesondere rund um die Sommerzeitumstellung). Für die Ausgabe
+  wird der Original-Offset beibehalten – es wird **nicht** auf einen
+  festen Offset normalisiert. Dauer wird aus echten Instants berechnet.
 * `intermediate_stations_count` fehlt bei manchen Ergebnissen.
 * `trips[0].results` ist ein Dict, keine Liste.
 """
@@ -35,7 +37,11 @@ def offset_from_seconds(seconds: Any) -> tzinfo | None:
 
 
 def to_local(moment: datetime | None, tz: tzinfo | None) -> datetime | None:
-    """Umrechnung in die Zeitzone der Abfahrtsstadt."""
+    """Umrechnung in die Ziel-Zeitzone. Nur für Sortier-/Filterschlüssel.
+
+    Für die *Ausgabe* wird der Original-Offset beibehalten (``iso(moment)``);
+    diese Funktion ist ausschließlich für abgeleitete Werte gedacht.
+    """
     if moment is None:
         return None
     if moment.tzinfo is None:
@@ -44,23 +50,44 @@ def to_local(moment: datetime | None, tz: tzinfo | None) -> datetime | None:
 
 
 def iso(moment: datetime | None) -> str | None:
-    return moment.isoformat() if moment is not None else None
-
-
-def local_minutes(moment: datetime | None) -> int | None:
-    """Abfahrtszeit als Minuten seit Mitternacht in lokaler Zeit."""
+    """ISO-String mit Original-Offset des Zeitstempels (UTC falls naive)."""
     if moment is None:
         return None
-    return moment.hour * 60 + moment.minute
+    return moment.isoformat()
 
 
-def duration_minutes(raw: Any) -> int | None:
-    if not isinstance(raw, dict):
+def instant_diff_minutes(start: datetime | None, end: datetime | None) -> int | None:
+    """Differenz in Minuten aus echten aware-Instants.
+
+    Beide Zeitstempel werden zuerst in UTC umgerechnet, damit
+    Sommer-/Winterzeit-Sprünge und unterschiedliche Offsets
+    (``+02:00`` vs ``+01:00`` am DST-Tag) korrekt verrechnet werden.
+    Gibt ``None`` zurück, wenn mindestens ein Zeitstempel fehlt.
+    """
+    if start is None or end is None:
         return None
-    try:
-        return int(raw.get("hours") or 0) * 60 + int(raw.get("minutes") or 0)
-    except (TypeError, ValueError):
+    s = start if start.tzinfo is not None else start.replace(tzinfo=timezone.utc)
+    e = end if end.tzinfo is not None else end.replace(tzinfo=timezone.utc)
+    delta = e.astimezone(timezone.utc) - s.astimezone(timezone.utc)
+    return int(delta.total_seconds() // 60)
+
+
+def offset_seconds(moment: datetime | None) -> int | None:
+    """UTC-Offset eines Zeitstempels in Sekunden (für interne Felder)."""
+    if moment is None or moment.tzinfo is None:
         return None
+    off = moment.utcoffset()
+    return int(off.total_seconds()) if off is not None else 0
+
+
+def local_minutes(moment: datetime | None, tz: tzinfo | None = None) -> int | None:
+    """Minuten seit Mitternacht für Filter (in der lokalen Zone ``tz``)."""
+    if moment is None:
+        return None
+    target = moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
+    if tz is not None:
+        target = target.astimezone(tz)
+    return target.hour * 60 + target.minute
 
 
 def duration_text(minutes: int | None) -> str | None:
@@ -92,6 +119,32 @@ def transfer_count(raw: dict[str, Any]) -> int:
     return max(0, len(legs) - 1)
 
 
+def _station_name(stations: dict[str, Any] | None, station_id: Any) -> str:
+    info = (stations or {}).get(str(station_id or "")) or {}
+    return str(info.get("name") or station_id or "")
+
+
+def _city_name(cities: dict[str, Any] | None, city_id: Any) -> str:
+    info = (cities or {}).get(str(city_id or "")) or {}
+    return str(info.get("name") or "")
+
+
+def leg_dep_time(leg: dict[str, Any]) -> datetime | None:
+    return parse_api_datetime((leg.get("departure") or {}).get("date"))
+
+
+def leg_arr_time(leg: dict[str, Any]) -> datetime | None:
+    return parse_api_datetime((leg.get("arrival") or {}).get("date"))
+
+
+def trip_dep_time(raw: dict[str, Any]) -> datetime | None:
+    return parse_api_datetime((raw.get("departure") or {}).get("date"))
+
+
+def trip_arr_time(raw: dict[str, Any]) -> datetime | None:
+    return parse_api_datetime((raw.get("arrival") or {}).get("date"))
+
+
 def build_stops(
     raw: dict[str, Any],
     stations: dict[str, Any],
@@ -104,55 +157,59 @@ def build_stops(
     Ankunft eines Legs ist die Abfahrt des nächsten (Umstieg am selben
     Bahnhof), deshalb wird der Umstiegspunkt nur einmal ausgegeben.
 
-    `tz` ist der Offset der Abfahrtsstadt; ohne ihn wird der Offset des
-    ersten Legs benutzt (die API liefert je Stadt einen eigenen Offset).
+    Die Zeiten werden mit dem von der API gelieferten Original-Offset
+    ausgegeben – nicht auf einen festen Offset normalisiert. ``tz`` wird
+    nur als Fallback benutzt, falls die API für einen Halt versehentlich
+    keinen Offset liefert.
     """
     legs = [l for l in (raw.get("legs") or []) if isinstance(l, dict)]
     if not legs:
         return []
-    if tz is None:
-        first_dep = parse_api_datetime((legs[0].get("departure") or {}).get("date"))
-        if first_dep is not None and first_dep.tzinfo is not None:
-            tz = first_dep.tzinfo
-
-    stops: list[dict[str, Any]] = []
 
     def station_name(station_id: str | None) -> str:
-        info = (stations or {}).get(str(station_id or "")) or {}
-        return str(info.get("name") or station_id or "")
+        return _station_name(stations, station_id)
 
     def city_name(city_id: str | None) -> str:
-        info = (cities or {}).get(str(city_id or "")) or {}
-        return str(info.get("name") or "")
+        return _city_name(cities, city_id)
 
+    stops: list[dict[str, Any]] = []
     dep0 = legs[0].get("departure") or {}
+    dep0_moment = parse_api_datetime(dep0.get("date"))
+    if dep0_moment is not None and dep0_moment.tzinfo is None and tz is not None:
+        dep0_moment = dep0_moment.replace(tzinfo=tz)
     stops.append(
         {
             "type": "departure",
             "station": station_name(dep0.get("station_id")),
             "city": city_name(dep0.get("city_id")),
-            "time": iso(to_local(parse_api_datetime(dep0.get("date")), tz)),
+            "time": iso(dep0_moment),
             "means_of_transport": str(legs[0].get("means_of_transport") or ""),
         }
     )
     for leg in legs[1:]:
         arr = leg.get("departure") or {}
+        arr_moment = parse_api_datetime(arr.get("date"))
+        if arr_moment is not None and arr_moment.tzinfo is None and tz is not None:
+            arr_moment = arr_moment.replace(tzinfo=tz)
         stops.append(
             {
                 "type": "transfer",
                 "station": station_name(arr.get("station_id")),
                 "city": city_name(arr.get("city_id")),
-                "time": iso(to_local(parse_api_datetime(arr.get("date")), tz)),
+                "time": iso(arr_moment),
                 "means_of_transport": str(leg.get("means_of_transport") or ""),
             }
         )
     arr_last = legs[-1].get("arrival") or {}
+    arr_last_moment = parse_api_datetime(arr_last.get("date"))
+    if arr_last_moment is not None and arr_last_moment.tzinfo is None and tz is not None:
+        arr_last_moment = arr_last_moment.replace(tzinfo=tz)
     stops.append(
         {
             "type": "arrival",
             "station": station_name(arr_last.get("station_id")),
             "city": city_name(arr_last.get("city_id")),
-            "time": iso(to_local(parse_api_datetime(arr_last.get("date")), tz)),
+            "time": iso(arr_last_moment),
             "means_of_transport": str(legs[-1].get("means_of_transport") or ""),
         }
     )
@@ -171,10 +228,21 @@ def normalise_trip(
     day_iso: str,
     adults: int,
 ) -> dict[str, Any]:
+    """Normalisiert einen Roh-Trip.
+
+    ``tz`` ist der Offset der Abfahrtsstadt. Er wird **nur** als Fallback
+    für Zeitstempel ohne Offset und für abgeleitete Werte (Filter,
+    Sortierung, Dauer) benutzt; ausgegeben werden die Original-Offsets
+    der API.
+    """
     dep_raw = raw.get("departure") or {}
     arr_raw = raw.get("arrival") or {}
-    dep = to_local(parse_api_datetime(dep_raw.get("date")), tz)
-    arr = to_local(parse_api_datetime(arr_raw.get("date")), tz)
+    dep_moment = trip_dep_time(raw)
+    arr_moment = trip_arr_time(raw)
+    if dep_moment is not None and dep_moment.tzinfo is None and tz is not None:
+        dep_moment = dep_moment.replace(tzinfo=tz)
+    if arr_moment is not None and arr_moment.tzinfo is None and tz is not None:
+        arr_moment = arr_moment.replace(tzinfo=tz)
 
     price = raw.get("price") or {}
     available = raw.get("available") or {}
@@ -201,21 +269,28 @@ def normalise_trip(
     dep_city_id = str(dep_raw.get("city_id") or from_id)
     arr_city_id = str(arr_raw.get("city_id") or to_id)
 
+    minutes = instant_diff_minutes(dep_moment, arr_moment)
+    api_minutes = duration_minutes(raw.get("duration"))
+    if minutes is None:
+        minutes = api_minutes
+
     trip: dict[str, Any] = {
         "trip_id": uid,
         "status": str(raw.get("status") or ""),
         "direct": is_direct(raw),
         "transfers": transfer_count(raw),
         "provider": raw.get("provider"),
-        "departure": iso(dep),
-        "arrival": iso(arr),
-        "departure_station": str((stations or {}).get(str(dep_raw.get("station_id") or ""), {}).get("name") or ""),
-        "arrival_station": str((stations or {}).get(str(arr_raw.get("station_id") or ""), {}).get("name") or ""),
-        "departure_city": str((cities or {}).get(dep_city_id, {}).get("name") or ""),
-        "arrival_city": str((cities or {}).get(arr_city_id, {}).get("name") or ""),
+        "departure": iso(dep_moment),
+        "arrival": iso(arr_moment),
+        "departure_offset": offset_seconds(dep_moment),
+        "arrival_offset": offset_seconds(arr_moment),
+        "departure_station": _station_name(stations, dep_raw.get("station_id")),
+        "arrival_station": _station_name(stations, arr_raw.get("station_id")),
+        "departure_city": _city_name(cities, dep_city_id),
+        "arrival_city": _city_name(cities, arr_city_id),
         "departure_station_id": dep_raw.get("station_id"),
         "arrival_station_id": arr_raw.get("station_id"),
-        "duration_minutes": duration_minutes(raw.get("duration")),
+        "duration_minutes": minutes,
         "price": total,
         "price_with_platform_fee": price.get("total_with_platform_fee"),
         "seats_available": seats,
@@ -228,13 +303,22 @@ def normalise_trip(
     }
     trip["duration_text"] = duration_text(trip["duration_minutes"])
     # Sortierschlüssel werden nicht ausgegeben.
-    trip["_departure_minutes"] = local_minutes(dep)
-    trip["_sort_departure"] = dep.timestamp() if dep else 0.0
+    trip["_departure_minutes"] = local_minutes(dep_moment, tz=tz)
+    trip["_sort_departure"] = dep_moment.timestamp() if dep_moment else 0.0
     return trip
 
 
 def strip_internal(trip: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in trip.items() if not k.startswith("_")}
+
+
+def duration_minutes(raw: Any) -> int | None:
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return int(raw.get("hours") or 0) * 60 + int(raw.get("minutes") or 0)
+    except (TypeError, ValueError):
+        return None
 
 
 def apply_filters(
