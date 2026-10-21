@@ -442,6 +442,43 @@ class TestTripCommand:
                 assert stop["time"].endswith("+01:00"), stop
 
 
+    def test_text_output_shows_time_station_price(
+        self, fake_session: _FakeSession, tmp_path: Path
+    ) -> None:
+        """Regression (QA 2026-10-21): die Textausgabe von ``search`` muss
+        Zeit, Ort und Preis zeigen.
+
+        Vor dem Fix nahm der Renderer blind die ersten vier JSON-Keys einer
+        Verbindung - das waren ``trip_id``/``status``/``direct``/
+        ``transfers``, wodurch Abfahrtszeit, Station und Preis gar nicht
+        erst erschienen. Die UID frass ausserdem die halbe Zeile.
+        """
+        response = _make_dated_search_response("2026-10-25")
+        fake_session.register("/search/service/v4/search", response)
+        fake_session.register(
+            "/search/autocomplete/cities", make_cities_response(HEILBRONN, BERLIN)
+        )
+        with isolated_fs(tmp_path):
+            code, out, err = run_cli(
+                ["search", "heilbronn", "berlin", "--date", "2026-10-25"]
+            )
+        assert code == exit_for("ok"), (out, err)
+        # Jede Verbindung braucht mindestens: Abfahrtszeit, Ankunftszeit
+        # und Preis.
+        for needle in (
+            "2026-10-25T07:06:00+02:00",
+            "2026-10-25T13:57:00+02:00",
+            "19.99",
+        ):
+            assert needle in out, needle
+        assert "station" in out
+        # Keine Verbindungszeile darf von einem 60-Zeichen-UID-Dump
+        # dominiert werden.
+        for line in out.splitlines():
+            if line.strip().startswith("- ") and "departure=" in line:
+                assert len(line) < 300, line
+
+
 class TestCheapestCommand:
     def test_cheapest_min_per_day(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

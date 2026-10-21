@@ -79,6 +79,45 @@ def _to_text(payload: dict[str, Any]) -> str:
     """Lesbare Darstellung für den Non-JSON-Modus."""
     lines: list[str] = []
 
+    # Für Verbindungen die Felder, die ein Mensch wirklich braucht, in
+    # fester Reihenfolge. `trip_id` steht am Ende und gekürzt, weil er
+    # als UID-Salat sonst die halbe Zeile frisst – und weil genau die
+    # ersten vier JSON-Keys (trip_id/status/direct/transfers) sonst die
+    # Zeit, den Ort und den Preis verdecken würden.
+    _TRIP_TEXT_FIELDS = (
+        "departure",
+        "departure_station",
+        "arrival",
+        "arrival_station",
+        "duration_text",
+        "price",
+        "price_with_platform_fee",
+        "seats_available",
+        "direct",
+        "transfers",
+    )
+    _CITIES_TEXT_FIELDS = ("name", "district", "country", "id")
+    _STOP_TEXT_FIELDS = ("type", "station", "city", "time")
+
+    def _ordered(item: dict[str, Any], fields: tuple[str, ...]) -> list[tuple[str, Any]]:
+        pairs = [(k, v) for k, v in item.items()
+                 if not isinstance(v, (dict, list)) and k in fields]
+        return pairs or [(k, v) for k, v in item.items()
+                         if not isinstance(v, (dict, list))][:4]
+
+    def _short(value: Any, limit: int = 44) -> Any:
+        text = str(value)
+        if len(text) <= limit:
+            return text
+        return text[: limit - 1] + "…"
+
+    def _fmt(item: dict[str, Any], fields: tuple[str, ...], *, tail: tuple[str, ...] = ()) -> str:
+        head = ", ".join(f"{k}={v}" for k, v in _ordered(item, fields))
+        extra = [f"{k}={_short(item[k])}" for k in tail if k in item]
+        if extra:
+            head = (head + ", " if head else "") + ", ".join(extra)
+        return head
+
     def render(value: Any, indent: int = 0) -> None:
         pad = "  " * indent
         if isinstance(value, dict):
@@ -94,9 +133,14 @@ def _to_text(payload: dict[str, Any]) -> str:
         elif isinstance(value, list):
             for item in value:
                 if isinstance(item, dict):
-                    head = ", ".join(
-                        f"{k}={item[k]}" for k in list(item)[:4] if not isinstance(item[k], (dict, list))
-                    )
+                    if "departure_station" in item:
+                        head = _fmt(item, _TRIP_TEXT_FIELDS, tail=("trip_id",))
+                    elif "station" in item and "time" in item:
+                        head = _fmt(item, _STOP_TEXT_FIELDS)
+                    elif "timezone_offset_seconds" in item:
+                        head = _fmt(item, _CITIES_TEXT_FIELDS)
+                    else:
+                        head = _fmt(item, ())
                     lines.append(f"{pad}- {head}")
                 else:
                     lines.append(f"{pad}- {item}")
