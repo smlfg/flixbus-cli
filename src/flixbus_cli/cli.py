@@ -211,16 +211,21 @@ def _run_search(
                 break
 
     day_iso = day.isoformat()
-    trips = [
-        formatting.normalise_trip(
-            uid, raw_trip, stations, cities_map, tz,
-            from_id=origin["id"], to_id=dest["id"], day_iso=day_iso, adults=adults,
+    trips: list[dict[str, Any]] = []
+    for uid, raw_trip in results.items():
+        if not formatting.departs_on_day(formatting.trip_dep_time(raw_trip), day, tz):
+            continue
+        trips.append(
+            formatting.normalise_trip(
+                uid, raw_trip, stations, cities_map, tz,
+                from_id=origin["id"], to_id=dest["id"], day_iso=day_iso, adults=adults,
+            )
         )
-        for uid, raw_trip in results.items()
-    ]
 
     if cache:
-        for uid, raw_trip in results.items():
+        for trip in trips:
+            uid = trip["trip_id"]
+            raw_trip = results[uid]
             _TRIP_CACHE[uid] = {
                 "raw": raw_trip,
                 "stations": stations,

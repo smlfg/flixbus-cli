@@ -231,6 +231,41 @@ class TestSearchCommand:
         assert body["count"] == 1
         assert body["trips"][0]["price"] == 19.99
 
+    def test_excludes_after_midnight_next_calendar_day(
+        self, fake_session: _FakeSession, tmp_path: Path
+    ) -> None:
+        """API-Nachtfahrten des Folgetags (include_after_midnight_rides) werden ausgefiltert."""
+        day = "2026-10-26"
+        next_day = "2026-10-27"
+        on_day = make_trip(
+            uid="direct:on-day",
+            departure_iso=f"{day}T22:00:00+02:00",
+            arrival_iso=f"{next_day}T04:00:00+02:00",
+            price=15.99,
+        )
+        after_midnight = make_trip(
+            uid="direct:next-midnight",
+            departure_iso=f"{next_day}T00:20:00+01:00",
+            arrival_iso=f"{next_day}T06:00:00+01:00",
+            price=11.99,
+        )
+        response = make_search_response(
+            results={"direct:on-day": on_day, "direct:next-midnight": after_midnight}
+        )
+        fake_session.register("/search/service/v4/search", response)
+        fake_session.register(
+            "/search/autocomplete/cities", make_cities_response(HEILBRONN, BERLIN)
+        )
+        with isolated_fs(tmp_path):
+            code, out, err = run_cli(
+                ["search", "heilbronn", "berlin", "--date", day, "--json"]
+            )
+        assert code == exit_for("ok")
+        body = one_json(out)
+        assert body["count"] == 1
+        assert body["trips"][0]["trip_id"] == "direct:on-day"
+        assert all(t["departure"].startswith(f"{day}T") for t in body["trips"])
+
     def test_after_before_filter(self, fake_session: _FakeSession, tmp_path: Path) -> None:
         response = _make_dated_search_response("2026-10-25")
         fake_session.register("/search/service/v4/search", response)

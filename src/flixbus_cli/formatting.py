@@ -12,7 +12,7 @@ Wichtig (live verifiziert, siehe docs/ENDPOINTS.md):
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone, tzinfo
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from typing import Any
 
 
@@ -109,6 +109,18 @@ def local_minutes(moment: datetime | None, tz: tzinfo | None = None) -> int | No
     if tz is not None:
         target = target.astimezone(tz)
     return target.hour * 60 + target.minute
+
+
+def departs_on_day(moment: datetime | None, day: date, tz: tzinfo | None = None) -> bool:
+    """True, wenn die Abfahrt am Kalendertag ``day`` in der Origin-Zeitzone liegt.
+
+    Die Flix-Suche mit ``include_after_midnight_rides=1`` liefert auch Fahrten
+    nach Mitternacht des Folgetags; die werden hier ausgeschlossen.
+    """
+    local = to_local(moment, tz)
+    if local is None:
+        return False
+    return local.date() == day
 
 
 def duration_text(minutes: int | None) -> str | None:

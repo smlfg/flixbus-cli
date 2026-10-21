@@ -76,6 +76,21 @@ class TestOffsetFromSeconds:
         assert formatting.offset_from_seconds(raw) is None
 
 
+class TestDepartsOnDay:
+    def test_same_calendar_day(self) -> None:
+        moment = formatting.parse_api_datetime("2026-10-26T23:50:00+02:00")
+        tz = formatting.offset_from_seconds(7200)
+        assert formatting.departs_on_day(moment, date(2026, 10, 26), tz)
+
+    def test_after_midnight_next_day_excluded(self) -> None:
+        moment = formatting.parse_api_datetime("2026-10-27T00:20:00+01:00")
+        tz = formatting.offset_from_seconds(3600)
+        assert not formatting.departs_on_day(moment, date(2026, 10, 26), tz)
+
+    def test_none(self) -> None:
+        assert not formatting.departs_on_day(None, date(2026, 10, 26), None)
+
+
 class TestApplyFilters:
     def test_max_price(self) -> None:
         trips = [
