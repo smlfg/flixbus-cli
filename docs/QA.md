@@ -6,7 +6,8 @@ Lauf: 2026-10-21 (UTC+2). Install: frisches venv `/tmp/flix-qa`, `pip install gi
 |---|---|---|---|---|
 | `flix cities heilbronn --json` | Erster Treffer Heilbronn, UUID | `Heilbronn`, `40d91420-8646-11e6-9066-549f350fcb0c` | OK | — |
 | `flix search heilbronn berlin --date D5 --limit 5 --json` | Heilbronn-Umgebung → Berlin, D5 lokal, ≤5, Preis>0, Ankunft nach Abfahrt | 5 Treffer, semantisch geprüft | OK | — |
-| `flix search stuttgart münchen --date D5 --max-price 20 --direct --sort price --json` | Preis≤20, direkt, aufsteigend Preis | 20 Treffer, Preise 11.99…19.99 sortiert | OK | — |
+| `flix search heilbronn berlin --date D5 --json` (volle Liste, Datumsfilter) | Keine Abfahrt außerhalb D5 | 13 Treffer, alle `departure` beginnen mit `2026-10-26` | OK | `47d958e` |
+| `flix search stuttgart münchen --date D5 --max-price 20 --direct --sort price --json` | Preis≤20, direkt, aufsteigend Preis, **alle Abfahrten lokal am D5** | vorher: 20 Treffer inkl. 4× Abfahrt `2026-10-27T00:20/01:15/03:20+01:00`; nachher: 20 Treffer, nur `2026-10-26T…`, Preise 12.99…18.49 sortiert | OK | `47d958e` |
 | `flix search frankfurt köln --date D3 --after 10:00 --before 14:00 --json` | Abfahrten 10:00–14:00 lokal | 6 Treffer, alle im Fenster | OK | — |
 | Zeitzone DST 2026-10-25 (nach 03:00 +01:00, vs. API curl) | Lokale Uhrzeit = API-Rohdaten | 0 Offset-/Zeit-Abweichungen (Stuttgart–München) | OK | (Regression: `8dd689d`) |
 | `flix trip <id> --json` (neuer Prozess nach `search`) | Erster Halt Abfahrt, Berlin im Ziel, Zeiten monoton | 4 Halte, OK | OK | — |
@@ -22,13 +23,13 @@ Lauf: 2026-10-21 (UTC+2). Install: frisches venv `/tmp/flix-qa`, `pip install gi
 | `trip gibtsnicht --json` | Sauberer Fehler, kein Traceback | Exit 4, ein JSON-Fehlerobjekt | OK | — |
 | `book x --confirm --json` | Exit 5, ein JSON-Fehlerobjekt | Exit 5, `kind: forbidden` | OK | — |
 | `flix --version` / `--help` / `search --help` | Stimmt mit README (Optionen vorhanden) | `flix 0.1.0`, alle dokumentierten `search`-Flags in `--help` | OK | — |
-| `pytest -q` (Repo) | Grün | 93 passed | OK | — |
+| `pytest -q` (Repo) | Grün | 97 passed | OK | `47d958e` |
 
 \*Abweichung nur zwischen QA-Checkliste und `INTERFACE.md`/`docs/ACCEPTANCE.md` (F5: idempotenter No-op Exit 0); Implementierung folgt dem Vertrag.
 
 ## Fixes in diesem Lauf
 
-Keine neuen Fixes nötig; bereits gepushte Commits live verifiziert: `02d290c` (watch.json Exit 4), `8dd689d` (Trip/DST), `78c8a1f` (Textausgabe).
+- `47d958e`: Suchergebnisse filtern Nachtfahrten des Folgetags (`include_after_midnight_rides`), sodass `--date`, `--after`/`--before`, `count`/`total` und `cheapest`-Tagesminimum konsistent sind.
 
 ## Offene Punkte
 
