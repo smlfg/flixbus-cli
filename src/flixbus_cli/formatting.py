@@ -80,6 +80,27 @@ def offset_seconds(moment: datetime | None) -> int | None:
     return int(off.total_seconds()) if off is not None else 0
 
 
+def offset_label(moment: datetime | None) -> str | None:
+    """"+02:00" / "-05:30" für einen Zeitstempel mit Offset.
+
+    Wird für Felder benutzt, die eine Zone *bezeichnen* (z. B. das
+    ``timezone``-Feld von ``flix trip``). Der Offset muss aus dem
+    Zeitstempel selbst stammen: ``timezone_offset_seconds`` der Stadt
+    beschreibt den Offset *heute* und ist nach dem Ende der Sommerzeit
+    um eine Stunde falsch – die Abfahrtszeit trägt dann ``+01:00``,
+    während die Stadt noch ``+02:00`` meldet.
+    """
+    if moment is None or moment.tzinfo is None:
+        return None
+    off = moment.utcoffset()
+    if off is None:
+        return None
+    total = int(off.total_seconds())
+    sign = "+" if total >= 0 else "-"
+    total = abs(total)
+    return f"{sign}{total // 3600:02d}:{(total % 3600) // 60:02d}"
+
+
 def local_minutes(moment: datetime | None, tz: tzinfo | None = None) -> int | None:
     """Minuten seit Mitternacht für Filter (in der lokalen Zone ``tz``)."""
     if moment is None:

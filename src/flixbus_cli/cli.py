@@ -411,7 +411,7 @@ def cmd_trip(args: argparse.Namespace, as_json: bool) -> int:
         "price_with_platform_fee": price.get("total_with_platform_fee"),
         "seats_available": seats,
         "stops": stops,
-        "timezone": _tz_label(tz),
+        "timezone": formatting.offset_label(dep_moment) or _tz_label(tz),
         "source": "cache",
         "saved_at": entry.get("saved_at"),
     }

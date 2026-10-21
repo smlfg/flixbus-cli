@@ -392,6 +392,56 @@ class TestTripCommand:
         assert body["direct"] is True
 
 
+    def test_trip_timezone_follows_departure_offset_across_dst(
+            self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        ) -> None:
+            """Regression (QA 2026-10-21): ``timezone`` muss der Zone der
+            Abfahrtszeit folgen, nicht ``timezone_offset_seconds`` der Stadt.
+
+            Live-Befund: die Stadt-Fixture meldet ``+02:00`` (Offset *heute*),
+            die Fahrten am 26.10. tragen aber ``+01:00``, weil die Sommerzeit
+            am 25.10.2026 endet. Vor dem Fix meldete ``flix trip``
+            ``"timezone": "+02:00"`` und widersprach damit den Zeiten im
+            selben Objekt.
+            """
+            from pathlib import Path as PathCls
+            from flixbus_cli import cli as cli_mod
+
+            sess = _FakeSession()
+            monkeypatch.setattr(api_mod, "session", lambda: sess)
+            day_iso = "2026-10-26"  # nach dem Ende der Sommerzeit
+            trip_uid = "ic:winter-trip"
+            trip = make_trip(
+                uid=trip_uid,
+                departure_iso=f"{day_iso}T05:33:00+01:00",
+                arrival_iso=f"{day_iso}T16:04:00+01:00",
+                price=79.99,
+                duration_minutes=631,
+            )
+            sess.register(
+                "/search/service/v4/search",
+                make_search_response(results={trip_uid: trip}),
+            )
+            sess.register("/search/autocomplete/cities", make_cities_response(HEILBRONN, BERLIN))
+
+            with isolated_fs(tmp_path):
+                code, out, err = run_cli(
+                    ["search", "heilbronn", "berlin", "--date", day_iso, "--json"]
+                )
+                assert code == exit_for("ok"), (out, err)
+                cli_mod._TRIP_CACHE.clear()
+                code2, out2, err2 = run_cli(["trip", trip_uid, "--json"])
+
+            assert code2 == exit_for("ok"), (out2, err2)
+            body = one_json(out2)
+            assert body["from"]["time"] == f"{day_iso}T05:33:00+01:00"
+            # Zone = Offset der Abfahrtszeit, nicht der Stadt (7200 -> +02:00).
+            assert body["timezone"] == "+01:00", body["timezone"]
+            # Kein Halt darf eine andere Zone als die Abfahrt tragen.
+            for stop in body["stops"]:
+                assert stop["time"].endswith("+01:00"), stop
+
+
 class TestCheapestCommand:
     def test_cheapest_min_per_day(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
