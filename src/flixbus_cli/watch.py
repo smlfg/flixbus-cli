@@ -13,6 +13,8 @@ import tempfile
 from datetime import datetime, timezone
 from typing import Any
 
+from .api import ParseError
+
 CONFIG_DIR_NAME = "flixbus-cli"
 WATCH_FILE = "watch.json"
 
@@ -37,11 +39,14 @@ def load() -> dict[str, dict[str, Any]]:
     try:
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
-    except (OSError, json.JSONDecodeError):
-        # Kaputte Datei darf den Befehl nicht crashen -> leere Liste.
-        return _empty()
+    except json.JSONDecodeError as exc:
+        raise ParseError(
+            f"watch.json ist kaputt: {exc}. Bitte reparieren oder löschen."
+        ) from exc
+    except OSError as exc:
+        raise ParseError(f"watch.json nicht lesbar: {exc}") from exc
     if not isinstance(data, dict):
-        return _empty()
+        raise ParseError("watch.json muss ein JSON-Objekt sein.")
     return {str(k): v for k, v in data.items() if isinstance(v, dict)}
 
 
